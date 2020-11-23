@@ -1,0 +1,146 @@
+//Written in Groovy
+definition(
+    name: "Energy-Output-Collector",
+    namespace: "sciocca",
+    author: "Sam Ciocca",
+    description: "Collect information about the energy use of a smart outlet",
+    category: "",
+    iconUrl: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience.png",
+    iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png",
+    iconX3Url: "https://s3.amazonaws.com/smartapp-icons/Convenience/Cat-Convenience@2x.png")
+
+
+preferences {
+    section("About") {
+        paragraph "Using power monitoring switch, monitor for a change in power consumption, and alert when the power draw stops."
+    }
+
+    section ("When this device stops drawing power") {
+        input "meter", "capability.powerMeter", multiple: false, required: true
+    }
+
+    section ("Advanced options", hidden: true, hideable: true) {
+        input "upperThreshold", "number", title: "start when power raises above (W)", description: "1", defaultValue: 1, required: true
+        input "lowerThreshold", "number", title: "stop when power drops below (W)", description: "0.1", defaultValue: 0.1, required: true
+    }
+
+    section ("Send this message") {
+        input "message", "text", title: "Notification message", description: "Scooter is done charging.", required: true
+        input "includeDuration", "boolean", title: "Include the duration in the message?", defaultValue: false
+    }
+
+	section ("Notification method") {
+        input "sendPushMessage", "boolean", title: "Send a push notification?", defaultValue: true
+        input("recipients", "contact", title: "Send notifications to") {
+            input "phone", "phone", title: "Notify with text message (optional)", description: "Phone Number", required: false
+        }
+ 	}
+
+    section ("Additionally", hidden: hideOptionsSection(), hideable: true) {
+        input "enablePolling", "boolean", title: "Enable polling?", defaultValue: false
+        input "interval", "number", title: "Polling interval in minutes:", description: "5", defaultValue: 5
+        input "debugOutput", "boolean", title: "Enable debug logging?", defaultValue: false
+    }
+}
+
+def installed() {
+    log.trace "Installed with settings: ${settings}"
+
+    initialize()
+}
+
+def updated() {
+    log.trace "Updated with settings: ${settings}"
+
+    unsubscribe()
+    initialize()
+}
+
+def initialize() {
+    //Set the initial state
+    state.cycleStart = null
+    state.debug = (debugOutput) ? debugOutput.toBoolean() : false
+	state.duration = (includeDuration) ? includeDuration.toBoolean() : false
+
+    def pollingInterval = (interval) ? interval : 5
+    def tickerSchedule = "0 0/${pollingInterval} * * * ?"
+
+    if (state.debug) {
+        if (enablePolling && enablePolling.toBoolean()) {
+            log.debug "Polling every ${pollingInterval} minutes"
+        }
+        else {
+            log.debug "Polling disabled"
+        }
+    }
+    if (enablePolling && enablePolling.toBoolean()) {
+        schedule(tickerSchedule, ticker)
+    }
+    subscribe(meter, "power", powerHandler)
+}
+
+def ticker(evt) {
+    meter.poll()
+
+    def currPower = meter.currentValue("power")
+    if (state.debug && currPower > upperThreshold) {
+        log.debug "Power ${currPower}W above threshold of ${upperThreshold}W"
+    }
+    else if (state.debug && currPower <= lowerThreshold) {
+        log.debug "Power ${currPower}W below threshold of ${lowerThreshold}W"
+    }
+}
+
+def powerHandler(evt) {
+    if (state.debug) {
+        log.debug "power evt: ${evt}"
+        log.debug "state: ${state}"
+    }
+
+    def currPower = meter.currentValue("power")
+    log.trace "Power: ${currPower}W"
+
+	//If cycle is not on and power exceeds upper threshold, start the cycle
+    if ((currPower > upperThreshold) && !atomicState.cycleStart) {
+        atomicState.cycleStart = now()
+        log.trace "Cycle started."
+    }
+    // If the device stops drawing power, the cycle is complete, send notification.
+    else if ((currPower <= lowerThreshold) && atomicState.cycleStart) {
+        def duration = now() - state.cycleStart
+        atomicState.cycleStart = null
+        log.trace "Cycle ended after ${duration} milliseconds."
+		if (state.duration) {
+			def d = new Date(duration)
+			def h = d.getHours()
+			def m = d.getMinutes()
+			def s = d.getSeconds()
+			def msg = "${message} - Cycle ended after " + "$h:".padLeft(3,'0') + "$m:".padLeft(3,'0') + "${s}".padLeft(2,'0') + " (HH:MM:SS)"
+			send(msg)
+		}
+		else {
+			send(message)
+		}
+    }
+}
+
+private send(msg) {
+    if (sendPushMessage.toBoolean()) {
+        sendPush(msg)
+    }
+
+	if (location.contactBookEnabled && recipients) {
+    	sendNotificationToContacts(msg, recipients)
+    } else if (phone) { // check that the user did select a phone number
+    	sendSms(phone, msg)
+    }
+    
+    if (state.debug) {
+        log.debug msg
+    }
+}
+
+
+private hideOptionsSection() {
+    (interval || debugOutput) ? false : true
+}
